@@ -1,43 +1,55 @@
 from redis import StrictRedis
 
 
+LOCK_PREFIX = 'LOCK:'
+
+TIMEOUT = 10
+
+
 class RedisTopTalkerTracker(object):
     def __init__(self, redis_host='localhost', redis_port=6379):
         self.client = StrictRedis(host=redis_host, port=redis_port)
+        self.locks = {}
+
+    def get_lock(self, redis_table):
+        r = self.locks.get(redis_table)
+        if r:
+            return r
+
+        r = self.client.lock(LOCK_PREFIX + redis_table, timeout=TIMEOUT)
+        self.locks[redis_table] = r
+        return r
 
     def is_full_inner(self, redis_table, redis_size):
         return self.client.zcard(redis_table) >= redis_size
-
-    def lock(self, redis_table):
-        pass
-
-    def unlock(self, redis_table):
-        pass
 
     def clear(self, redis_table):
         """
         table -> None
         """
-        self.lock(redis_table)
+        lock = self.get_lock(redis_table)
+        lock.acquire()
         self.client.zremrangebyrank(redis_table, 0, -1)
-        self.unlock(redis_table)
+        lock.release()
 
     def is_full(self, redis_table, redis_size):
         """
         (table, size) -> bool
         """
-        self.lock(redis_table)
+        lock = self.get_lock(redis_table)
+        lock.acquire()
         r = self.is_full_inner(redis_table, redis_size)
-        self.unlock(redis_table)
+        lock.release()
         return r
 
     def get(self, redis_table, key):
         """
         (table, key) -> count or None
         """
-        self.lock(redis_table)
+        lock = self.get_lock(redis_table)
+        lock.acquire()
         count = self.client.zscore(redis_table, key)
-        self.unlock(redis_table)
+        lock.release()
 
         if count is None:
             return count
@@ -48,64 +60,68 @@ class RedisTopTalkerTracker(object):
         """
         (table, key) -> bool
         """
-        self.lock(redis_table)
+        lock = self.get_lock(redis_table)
+        lock.acquire()
         count = self.client.zscore(redis_table, key)
-        self.unlock(redis_table)
+        lock.release()
         return count is not None
 
     def add(self, redis_table, redis_size, key):
         """
         (table, size, key) -> None
         """
-        self.lock(redis_table)
+        lock = self.get_lock(redis_table)
+        lock.acquire()
 
         # If it's already in there, increment its count and we're done.
         count = self.client.zscore(redis_table, key)
         if count is not None:
             self.client.zincrby(redis_table, key, 1)
-            self.unlock(redis_table)
+            lock.release()
             return
 
         # Else if the key is new to us but we're full, pop the lowest key/count
         # pair and insert the new key as count + 1.
-        if self.is_full(redis_table, redis_size):
+        if self.is_full_inner(redis_table, redis_size):
             keys_counts = self.client.zrange(
                 redis_table, 0, 0, withscores=True, score_cast_func=int)
             old_count = keys_counts[0][1]
             self.client.zremrangebyrank(redis_table, 0, 0)
             new_count = old_count + 1
             self.client.zadd(redis_table, new_count, key)
-            self.unlock(redis_table)
+            lock.release()
             return
 
         # Or if the key is new to us and we have space, just insert it.
         self.client.zadd(redis_table, 1, key)
-        self.unlock(redis_table)
+        lock.release()
 
     def top_n_keys(self, redis_table, n):
         """
         (table, n) -> list of keys
         """
-        self.lock(redis_table)
+        lock = self.get_lock(redis_table)
+        lock.acquire()
         rr = self.client.zrevrange(
             redis_table, 0, n - 1, score_cast_func=int)
-        self.unlock(redis_table)
+        lock.release()
         return rr
 
     def top_n_keys_counts(self, redis_table, redis_size, n):
         """
         (table, size, n) -> list of (key, count)
         """
-        self.lock(redis_table)
+        lock = self.get_lock(redis_table)
+        lock.acquire()
         keys_counts = self.client.zrevrange(
             redis_table, 0, n - 1, withscores=True, score_cast_func=int)
-        if self.is_full(redis_table, redis_size):
+        if self.is_full_inner(redis_table, redis_size):
             lowest_keys_counts = self.client.zrange(
                 redis_table, 0, 0, withscores=True, score_cast_func=int)
             the_min = lowest_keys_counts[0][1] - 1
         else:
             the_min = 0
-        self.unlock(redis_table)
+        lock.release()
         return map(lambda (key, count): (key, count - the_min), keys_counts)
 
 
