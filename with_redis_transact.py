@@ -5,13 +5,25 @@ class RedisTopTalkerTracker(object):
     def __init__(self, redis_host='localhost', redis_port=6379):
         self.client = StrictRedis(host=redis_host, port=redis_port)
 
+    def is_full_inner(self, redis_table, redis_size):
+        return self.client.zcard(redis_table) >= redis_size
+
     def clear(self, redis_table):
+        """
+        table -> None
+        """
         self.client.zremrangebyrank(redis_table, 0, -1)
 
     def is_full(self, redis_table, redis_size):
-        return self.client.zcard(redis_table) >= redis_size
+        """
+        (table, size) -> bool
+        """
+        return self.is_full_inner(redis_table, redis_size)
 
     def get(self, redis_table, key):
+        """
+        (table, key) -> count or None
+        """
         count = self.client.zscore(redis_table, key)
         if count is None:
             return count
@@ -19,10 +31,16 @@ class RedisTopTalkerTracker(object):
         return int(count)
 
     def contains(self, redis_table, key):
+        """
+        (table, key) -> bool
+        """
         count = self.client.zscore(redis_table, key)
         return count is not None
 
     def add(self, redis_table, redis_size, key):
+        """
+        (table, size, key) -> None
+        """
         # If it's already in there, increment its count and we're done.
         count = self.client.zscore(redis_table, key)
         if count is not None:
@@ -44,10 +62,16 @@ class RedisTopTalkerTracker(object):
         self.client.zadd(redis_table, 1, key)
 
     def top_n_keys(self, redis_table, n):
+        """
+        (table, n) -> list of keys
+        """
         return self.client.zrevrange(
             redis_table, 0, n - 1, score_cast_func=int)
 
     def top_n_keys_counts(self, redis_table, redis_size, n):
+        """
+        (table, size, n) -> list of (key, count)
+        """
         keys_counts = self.client.zrevrange(
             redis_table, 0, n - 1, withscores=True, score_cast_func=int)
         if self.is_full(redis_table, redis_size):
